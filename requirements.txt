@@ -1,0 +1,4 @@
+# Patchright is a drop-in Playwright fork that defeats CDP-based bot detection
+# (Cloudflare Turnstile on ChatGPT/Claude). It pulls in a compatible Playwright too.
+patchright
+playwright

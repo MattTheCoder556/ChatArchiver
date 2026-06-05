@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+# Browser profiles / saved logins never belong in git
+.chatarchiver/
+# PyInstaller build artifacts
+build/
+dist/
+build_log.txt
+selftest_result.txt
