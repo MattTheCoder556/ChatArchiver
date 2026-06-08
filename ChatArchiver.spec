@@ -1,8 +1,10 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller build for Chat Archiver (one-folder, windowed).
 
-The hard part of packaging this app is Patchright/Playwright: they ship a Node-based
-driver and data files that must travel with the exe. collect_all() pulls those in.
+The hard part of packaging this app is Playwright: it ships a Node-based driver and data
+files that must travel with the exe. collect_all() pulls those in. (The Firefox browser
+itself is NOT bundled — it lives in the user's Playwright cache; run
+`python -m playwright install firefox` on the target machine.)
 
 Build:  pyinstaller --noconfirm ChatArchiver.spec
 Output: dist/ChatArchiver/ChatArchiver.exe
@@ -10,7 +12,9 @@ Output: dist/ChatArchiver/ChatArchiver.exe
 from PyInstaller.utils.hooks import collect_all
 
 datas, binaries, hiddenimports = [], [], []
-for _pkg in ("patchright", "playwright"):
+# playwright: bundled driver (Gemini path). curl_cffi: compiled TLS libs + cert bundle.
+# browser_cookie3: reads the user's browser session for the cookie-handoff path.
+for _pkg in ("playwright", "curl_cffi", "browser_cookie3"):
     _d, _b, _h = collect_all(_pkg)
     datas += _d
     binaries += _b

@@ -1,14 +1,24 @@
-"""Drives a real browser via Patchright/Playwright using a persistent profile.
+"""Drives Mozilla Firefox via Playwright using a persistent profile.
 
-Login  (open_for_login): a VISIBLE window so the user can sign in once. Session is
+We deliberately use **Firefox, not Chrome/Chromium**: it's outside Google's browser
+lineage, so no Google binary runs and no Google telemetry is involved. Playwright ships
+its own pinned Firefox build (installed via `python -m playwright install firefox`) — a
+real Firefox, just version-matched to the driver.
+
+Login  (open_for_login): a VISIBLE Firefox window so you sign in once. The session is
 saved in the profile dir — no passwords stored.
 
-Export (run_export): runs HEADLESS in the background by default. Only if the background
-session isn't authenticated (e.g. headless got challenged, or the login expired) does it
-pop a visible window and retry. Export is incremental — see _run_export_in_context.
+Export (run_export): runs HEADLESS in the background using the saved session. Only if the
+background session isn't authenticated (login expired, or a bot-check wants a real
+window) does it pop a visible window and retry. Export is incremental — see
+_run_export_in_context.
 
-Anti-bot note: Cloudflare Turnstile detects the CDP automation channel itself, so we
-prefer Patchright (a Playwright fork that closes those leaks), driving real Chrome.
+Captcha note: bot-checks (e.g. Cloudflare on ChatGPT) are tuned against headless
+automation, not against a human signing in. Because the data fetches run from *inside* a
+normally-loaded Firefox page (same cookies, same origin), the reliable path is: log in
+once in the visible window, then let the headless export reuse that established session.
+If a headless run gets challenged, check_auth returns False and we transparently retry in
+a visible window.
 """
 from __future__ import annotations
 
@@ -16,79 +26,47 @@ import threading
 import time
 from typing import Callable
 
-try:
-    from patchright.sync_api import sync_playwright
-    _USING_PATCHRIGHT = True
-except ImportError:                       # pragma: no cover - fallback only
-    from playwright.sync_api import sync_playwright
-    _USING_PATCHRIGHT = False
+from .sessions import ensure_browsers_path, profile_dir
+
+# Must run before Playwright resolves the browser path (critical for the frozen build).
+ensure_browsers_path()
+
+from playwright.sync_api import sync_playwright  # noqa: E402  (after ensure_browsers_path)
 
 from .markdown_writer import write_conversation
 from .providers.base import Provider
-from .sessions import load_config, profile_dir
 from .store import content_key, load_manifest, save_manifest, updated_key
 
-_STEALTH_ARGS = [
-    "--no-first-run",
-    "--no-default-browser-check",
-    "--disable-blink-features=AutomationControlled",
-]
-_IGNORE_DEFAULT_ARGS = ["--enable-automation"]
-_HIDE_WEBDRIVER = "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
 
 class _NotAuthenticated(Exception):
     """Raised when an export context isn't logged in — triggers the headed retry."""
 
 
-def _browser_attempts() -> list[dict]:
-    """Ordered launch options to try: a user-set custom browser .exe first, then the
-    auto-detected channels (real Chrome, then Edge), then the bundled Chromium."""
-    attempts: list[dict] = []
-    custom = (load_config().get("browser_path") or "").strip()
-    if custom:
-        attempts.append({"executable_path": custom})   # Brave/Vivaldi/Opera/portable…
-    attempts.append({"channel": "chrome"})
-    attempts.append({"channel": "msedge"})
-    attempts.append({})                                 # bundled chromium
-    return attempts
-
-
 def _friendly_launch_error(e: Exception) -> Exception:
     msg = str(e)
     if "Executable" in msg or "install" in msg.lower():
-        tool = "patchright" if _USING_PATCHRIGHT else "playwright"
         return RuntimeError(
-            "No usable browser found. Install Google Chrome, or open a terminal here and run:\n"
-            f"    python -m {tool} install chromium")
+            "Firefox isn't installed for Playwright. Open a terminal here and run:\n"
+            "    python -m playwright install firefox")
     return e
 
 
 def _launch_context(pw, pdir, headless: bool):
-    """Open a persistent context with the first browser option that works."""
-    last_err: Exception | None = None
-    for frag in _browser_attempts():
-        try:
-            kwargs: dict = dict(user_data_dir=str(pdir), headless=headless)
-            if headless:
-                kwargs["viewport"] = {"width": 1366, "height": 900}
-            else:
-                kwargs["no_viewport"] = True
-            kwargs.update(frag)   # custom executable_path OR channel (or neither)
-            if not _USING_PATCHRIGHT:
-                kwargs["args"] = _STEALTH_ARGS
-                kwargs["ignore_default_args"] = _IGNORE_DEFAULT_ARGS
-            ctx = pw.chromium.launch_persistent_context(**kwargs)
-            if not _USING_PATCHRIGHT:
-                ctx.add_init_script(_HIDE_WEBDRIVER)
-            return ctx
-        except Exception as e:   # browser not found / failed → try the next option
-            last_err = e
-    raise _friendly_launch_error(last_err or RuntimeError("Could not launch a browser"))
+    """Open a persistent Firefox context — the saved login lives in `pdir`."""
+    try:
+        kwargs: dict = dict(user_data_dir=str(pdir), headless=headless)
+        if headless:
+            kwargs["viewport"] = {"width": 1366, "height": 900}
+        else:
+            kwargs["no_viewport"] = True
+        return pw.firefox.launch_persistent_context(**kwargs)
+    except Exception as e:
+        raise _friendly_launch_error(e)
 
 
 def open_for_login(provider: Provider, status_cb: Callable[[str], None],
                    stop_event: threading.Event, timeout_s: int = 300) -> bool:
-    """Open a visible browser for the user to log in. Returns True once authenticated."""
+    """Open a visible Firefox window for the user to log in. True once authenticated."""
     pdir = profile_dir(provider.id)
     with sync_playwright() as pw:
         ctx = _launch_context(pw, pdir, headless=False)
@@ -150,6 +128,10 @@ def _export(provider, out_dir, headless, status_cb, progress_cb) -> dict:
 
 def _run_export_in_context(provider, out_dir, ctx, status_cb, progress_cb) -> dict:
     page = ctx.pages[0] if ctx.pages else ctx.new_page()
+    return _drive_export(provider, out_dir, page, status_cb, progress_cb)
+
+
+def _drive_export(provider, out_dir, page, status_cb, progress_cb) -> dict:
     page.goto(provider.home_url, wait_until="domcontentloaded", timeout=60000)
     if not provider.check_auth(page):
         raise _NotAuthenticated()
@@ -191,3 +173,39 @@ def _run_export_in_context(provider, out_dir, ctx, status_cb, progress_cb) -> di
     save_manifest(provider.id, manifest)
     return {"new": new, "updated": updated, "unchanged": unchanged,
             "failed": failed, "total": total, "out_dir": str(out_dir / provider.id)}
+
+
+def run_export_injected(provider, out_dir, cookies, user_agent, status_cb, progress_cb,
+                        write: bool = True, sample: int = 3) -> dict:
+    """Headless export using cookies carried in from the user's OWN browser — no login
+    window. For sites that block an automated *login* but accept an already-authenticated
+    session via cookies (Gemini: no JSON API, so we still render + scrape, but auth comes
+    from your real Google session instead of a separate Playwright login).
+
+    write=False = connectivity check (list only, no files).
+    """
+    with sync_playwright() as pw:
+        browser = pw.firefox.launch(headless=True)
+        try:
+            # A wide/tall viewport keeps Gemini's history sidebar expanded (it collapses
+            # to a hamburger when narrow, which hides the conversation list).
+            ctx = browser.new_context(user_agent=user_agent,
+                                      viewport={"width": 1500, "height": 1000})
+            ctx.add_cookies(cookies)
+            if write:
+                try:
+                    return _run_export_in_context(provider, out_dir, ctx, status_cb, progress_cb)
+                except _NotAuthenticated:
+                    raise RuntimeError("injected Google session not logged in (cookies expired?)")
+            page = ctx.new_page()
+            page.goto(provider.home_url, wait_until="domcontentloaded", timeout=60000)
+            if not provider.check_auth(page):
+                raise RuntimeError("injected Google session not logged in (cookies expired?)")
+            metas = provider.list_conversations(page)
+            return {"new": min(sample, len(metas)), "updated": 0, "unchanged": 0,
+                    "failed": 0, "total": len(metas), "out_dir": str(out_dir / provider.id)}
+        finally:
+            try:
+                browser.close()
+            except Exception:
+                pass
