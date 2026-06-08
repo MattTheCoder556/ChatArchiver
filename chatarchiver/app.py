@@ -14,7 +14,7 @@ from pathlib import Path
 from tkinter import filedialog, ttk
 
 from . import scheduler
-from .cookie_fetch import COOKIE_PROVIDERS, WIP_PROVIDER_IDS, site_url
+from .cookie_fetch import COOKIE_PROVIDERS, WIP_PROVIDER_IDS, session_status, site_url
 from .cookie_fetch import export as cookie_export
 from .playwright_runner import open_for_login, run_export
 from .providers import PROVIDERS
@@ -67,6 +67,9 @@ class App:
         ttk.Label(self.root, text="   ChatGPT/Claude: log in in your own browser, then Export "
                                   "(no Chrome, no Google binary).",
                   foreground=_GREY).pack(fill="x", padx=10)
+
+        ttk.Button(self.root, text="↻ Refresh sessions",
+                   command=self._refresh_sessions).pack(anchor="w", padx=10, pady=(2, 0))
 
         box = ttk.LabelFrame(self.root, text="Accounts")
         box.pack(fill="x", **pad)
@@ -253,6 +256,24 @@ class App:
         threading.Thread(target=work, daemon=True).start()
 
     # ---- actions (spawn worker threads) ----
+    def _refresh_sessions(self) -> None:
+        """Flush cookies (WAL checkpoint) and re-check each provider's live session."""
+        def work():
+            self._post("log", "[refresh] Flushing cookies and re-checking sessions…")
+            colors = {"ok": _GREEN, "stale": _AMBER, "out": _GREY, "error": _RED}
+            try:
+                st = session_status()
+            except Exception as e:
+                self._post("log", f"[refresh] ERROR: {e}")
+                return
+            for pid, (state, short, detail) in st.items():
+                self._post("status", (pid, short, colors.get(state, _GREY)))
+                if detail:
+                    self._post("log", f"[{pid}] {detail}")
+            self._post("log", "[refresh] Done.")
+
+        threading.Thread(target=work, daemon=True).start()
+
     def _connect(self, prov) -> None:
         if prov.id in self.busy:
             return

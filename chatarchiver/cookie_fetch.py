@@ -17,9 +17,15 @@ from __future__ import annotations
 
 import glob
 import os
+import base64
+import json
 import re
+import shutil
+import sqlite3
 import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 
 import browser_cookie3 as bc3
@@ -118,8 +124,34 @@ def _impersonate(major: int) -> str:
     return f"firefox{min(_FF_TARGETS, key=lambda t: abs(t - major))}"
 
 
+def _fresh_firefox_copy(src: str) -> str:
+    """Copy cookies.sqlite + its WAL to a temp dir and checkpoint it, so reads see cookies
+    Firefox wrote moments ago (e.g. a token it just refreshed) instead of the stale main
+    DB. This is the 'flush'. Returns the path to the checkpointed copy."""
+    d = tempfile.mkdtemp(prefix="cha_ff_")
+    dst = os.path.join(d, "cookies.sqlite")
+    shutil.copy2(src, dst)
+    for ext in ("-wal", "-shm"):
+        if os.path.exists(src + ext):
+            shutil.copy2(src + ext, dst + ext)
+    try:
+        con = sqlite3.connect(dst)
+        con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        con.commit()
+        con.close()
+    except Exception:
+        pass
+    return dst
+
+
 def _load_jar(domain: str, browser: str, ff_file: str | None):
     if browser == "firefox":
+        if ff_file and os.path.exists(ff_file + "-wal"):   # WAL present → flush it first
+            tmp = _fresh_firefox_copy(ff_file)
+            try:
+                return bc3.firefox(cookie_file=tmp, domain_name=domain)
+            finally:
+                shutil.rmtree(os.path.dirname(tmp), ignore_errors=True)
         return bc3.firefox(cookie_file=ff_file, domain_name=domain)
     return getattr(bc3, browser)(domain_name=domain)
 
@@ -241,6 +273,9 @@ def _export_chatgpt(s, cookies, out, log, write, sample, progress=None) -> dict:
     while offset < 20000:
         r = s.get(f"{base}/backend-api/conversations?offset={offset}&limit={limit}&order=updated",
                   headers=headers, cookies=cookies, timeout=30)
+        if r.status_code == 401:
+            raise RuntimeError("ChatGPT access token expired — open chatgpt.com in the "
+                               "browser the tool reads (Firefox) to refresh it, then retry.")
         if r.status_code != 200:
             raise RuntimeError(f"conversations list HTTP {r.status_code}")
         batch = (r.json() or {}).get("items", [])
@@ -428,3 +463,69 @@ def export(providers=("chatgpt", "claude"), browser="auto", out_dir=None,
         finally:
             s.close()
     return results
+
+
+# ------------------------------------------------------------------ session status ----
+
+def _jwt_expired(token: str):
+    """True if the JWT's exp is in the past, False if valid, None if undecodable."""
+    try:
+        p = token.split(".")[1]
+        p += "=" * (-len(p) % 4)
+        exp = json.loads(base64.urlsafe_b64decode(p)).get("exp")
+        return bool(exp and exp < time.time())
+    except Exception:
+        return None
+
+
+def _status_one(pid, browser, ff_file, ua):
+    """Return (state, short, detail). state in: ok | stale | out | error."""
+    if pid == "gemini":
+        if _google_cookies_pw(browser, ff_file):
+            return ("ok", "ready ✓", "Google session found")
+        return ("out", "log in", "no Google session — log into gemini.google.com in Firefox")
+
+    domain = _DOMAIN[pid]
+    _, jar = _pick_browser(domain, browser, ff_file)
+    if not jar:
+        return ("out", "log in", f"not logged into {domain} in your browser")
+    cookies = _cookie_dict(jar)
+    s = creq.Session(impersonate="firefox147")
+    s.headers["User-Agent"] = ua
+    try:
+        if pid == "chatgpt":
+            r = s.get("https://chatgpt.com/api/auth/session", cookies=cookies, timeout=20)
+            tok = (r.json() or {}).get("accessToken") if r.ok else None
+            if not tok:
+                return ("out", "log in", "ChatGPT session not active — log in at chatgpt.com in Firefox")
+            if _jwt_expired(tok):
+                return ("stale", "token stale",
+                        "ChatGPT access token expired — open chatgpt.com in Firefox to refresh, "
+                        "then Refresh again")
+            return ("ok", "ready ✓", "ChatGPT ready")
+        if pid == "claude":
+            r = s.get("https://claude.ai/api/organizations", cookies=cookies, timeout=20)
+            ok = r.ok and isinstance(r.json(), list) and len(r.json()) > 0
+            return ("ok", "ready ✓", "Claude ready") if ok else ("out", "log in", "Claude session not active")
+        if pid == "grok":
+            r = s.get("https://grok.com/api/auth/session", cookies=cookies, timeout=20)
+            ok = r.ok and (r.json() or {}).get("status") == "authenticated"
+            return ("ok", "ready ✓", "Grok ready") if ok else ("out", "log in", "Grok session not active")
+    finally:
+        s.close()
+    return ("out", "—", "")
+
+
+def session_status(providers=("chatgpt", "claude", "gemini", "grok"), browser="auto") -> dict:
+    """Re-read cookies (WAL-flushed) and report each provider's live login/freshness.
+    Powers the UI 'Refresh sessions' button — no export, just a quick health check."""
+    ff_files = _firefox_cookie_files()
+    ff_file = ff_files[0] if ff_files else None
+    ua = _firefox_ua(_firefox_version())
+    out = {}
+    for pid in providers:
+        try:
+            out[pid] = _status_one(pid, browser, ff_file, ua)
+        except Exception as e:
+            out[pid] = ("error", "error", str(e)[:80])
+    return out
