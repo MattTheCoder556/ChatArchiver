@@ -26,7 +26,7 @@ import browser_cookie3 as bc3
 from curl_cffi import requests as creq
 
 from .markdown_writer import write_conversation
-from .models import Conversation
+from .models import Conversation, Message
 from .providers import chatgpt as _cg
 from .providers import claude as _cl
 from .sessions import output_dir_from_config
@@ -36,6 +36,7 @@ from .store import content_key, load_manifest, save_manifest, updated_key
 _SESSION_COOKIE = {
     "chatgpt.com": ("__Secure-next-auth.session-token", "__Secure-next-auth.session-token.0"),
     "claude.ai": ("sessionKey",),
+    "grok.com": ("sso",),
 }
 _DOMAIN = {
     "chatgpt": "chatgpt.com",
@@ -51,7 +52,7 @@ _DOMAIN = {
 }
 
 # Not yet implemented end-to-end: shown in the app, detect login, but export is stubbed.
-WIP_PROVIDER_IDS = ("deepseek", "mistral", "perplexity", "poe", "grok", "copilot")
+WIP_PROVIDER_IDS = ("deepseek", "mistral", "perplexity", "poe", "copilot")
 
 # Providers the GUI routes through cookie-handoff instead of a Playwright login window.
 # ChatGPT/Claude: pure HTTP (they have JSON APIs). Gemini: no API, so we inject your real
@@ -290,7 +291,45 @@ def _export_claude(s, cookies, out, log, write, sample, progress=None) -> dict:
                     out=out, log=log, write=write, sample=sample, progress=progress)
 
 
-_EXPORTERS = {"chatgpt": _export_chatgpt, "claude": _export_claude}
+_GROK_RENDER = re.compile(r"<grok:render\b.*?</grok:render>", re.DOTALL)
+
+
+def _parse_grok(raw) -> list:
+    out = []
+    for resp in (raw or {}).get("responses", []):
+        role = "user" if (resp.get("sender") or "").lower() == "human" else "assistant"
+        text = _GROK_RENDER.sub("", resp.get("message") or "")   # drop inline citation tags
+        if text.strip():
+            out.append(Message(role=role, text=text, created_at=_cl._parse_ts(resp.get("createTime"))))
+    return out
+
+
+def _export_grok(s, cookies, out, log, write, sample, progress=None) -> dict:
+    """Grok (grok.com, xAI): list conversations, then fetch each one's responses."""
+    base = "https://grok.com"
+    page_size = 1000
+    r = s.get(f"{base}/rest/app-chat/conversations?pageSize={page_size}", cookies=cookies, timeout=30)
+    if r.status_code != 200:
+        raise RuntimeError(f"conversations list HTTP {r.status_code}")
+    items = (r.json() or {}).get("conversations", [])
+    if len(items) >= page_size:
+        log(f"[grok] note: hit the {page_size}-conversation page cap — older ones may be missed.")
+
+    def fetch_raw(it):
+        cid = it["conversationId"]
+        return s.get(f"{base}/rest/app-chat/conversations/{cid}/responses",
+                     cookies=cookies, timeout=60).json()
+
+    return _process("grok", items,
+                    get_id=lambda it: it["conversationId"],
+                    get_title=lambda it: it.get("title") or "Untitled",
+                    get_created=lambda it: _cl._parse_ts(it.get("createTime")),
+                    get_updated=lambda it: _cl._parse_ts(it.get("modifyTime")),
+                    fetch_raw=fetch_raw, parse=_parse_grok,
+                    out=out, log=log, write=write, sample=sample, progress=progress)
+
+
+_EXPORTERS = {"chatgpt": _export_chatgpt, "claude": _export_claude, "grok": _export_grok}
 
 
 def _export_gemini(out: Path, log, write: bool, browser: str, ff_file, ua, sample: int,

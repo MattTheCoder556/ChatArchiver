@@ -139,7 +139,8 @@ pick — the engine is fixed, and the same Firefox is used by scheduled backgrou
 | ChatGPT  | ✅ | Cookie-handoff: replays chatgpt.com's backend API with your browser session. |
 | Claude   | ✅ | Cookie-handoff: replays claude.ai's API with your browser session. |
 | Gemini   | 🧪 | Injects your Google cookies into headless Firefox and scrapes the DOM (no API). Best-effort — a run may capture everything or, on a bad render, little. |
-| DeepSeek, Mistral (Le Chat), Perplexity, Poe, Grok, Copilot | 🚧 WIP | Wired into the UI (rows + "Log in" + login detection), but the per-service list/fetch endpoints aren't implemented yet. Export reports WIP instead of faking success. Each becomes ✅ once its endpoints are implemented + tested against a live login. |
+| Grok     | ✅ | Cookie-handoff: replays grok.com's REST API (`/rest/app-chat/conversations` + `/{id}/responses`) with your browser session. |
+| DeepSeek, Mistral (Le Chat), Perplexity, Poe, Copilot | 🚧 WIP | Wired into the UI (rows + "Log in" + login detection), but the per-service list/fetch endpoints aren't implemented yet. Export reports WIP instead of faking success. Each becomes ✅ once its endpoints are implemented + tested against a live login. (DeepSeek's auth lives in localStorage, not cookies — hardest of the set.) |
 
 Adding Copilot / DeepSeek / Perplexity / Grok is one new file in `chatarchiver/providers/`.
 
