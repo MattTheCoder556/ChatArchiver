@@ -10,7 +10,7 @@ cd "$(dirname "$0")"
 echo "=== Building Chat Archiver (Linux) ==="
 python3 -m pip install -r requirements.txt
 python3 -m pip install pyinstaller
-python3 -m patchright install chromium
+python3 -m playwright install firefox
 python3 -m PyInstaller --noconfirm ChatArchiver.spec
 echo
 echo "Done -> dist/ChatArchiver/ChatArchiver"

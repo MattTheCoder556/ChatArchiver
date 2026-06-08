@@ -3,7 +3,7 @@ cd /d "%~dp0"
 echo === Building Chat Archiver.exe ===
 python -m pip install -r requirements.txt
 python -m pip install pyinstaller
-python -m patchright install chromium
+python -m playwright install firefox
 echo.
 echo Running PyInstaller (this takes a few minutes)...
 python -m PyInstaller --noconfirm ChatArchiver.spec

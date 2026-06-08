@@ -25,6 +25,33 @@ remembers the session and never stores your password.
   Each file has YAML front-matter (title, dates, ids) and the full transcript as
   `## You` / `## Assistant` sections.
 
+## Recommended: cookie-handoff (gets past Cloudflare)
+
+ChatGPT and Claude sit behind Cloudflare, which blocks *automated* browsers (including
+Playwright's Firefox — there's no stealth layer for it). The reliable way in is to **not
+automate a browser at all**: stay logged into ChatGPT/Claude in your **normal everyday
+browser**, and let the tool replay the sites' own APIs with your session, using a TLS
+client that impersonates a real browser (so the `cf_clearance` you already earned still
+applies). No automated browser, no Google binary.
+
+```
+pip install -r requirements.txt
+python cookie_export.py --check     # verify it can reach your accounts (writes nothing)
+python cookie_export.py             # export ChatGPT + Claude to Markdown (incremental)
+```
+
+- Auto-detects which of your browsers holds a live session (`--browser firefox|chrome|…`
+  to force one). Snap/native/flatpak Firefox profiles are all found.
+- `--providers claude` to do just one; `--out "~/Chat Archive"` to choose a folder.
+- **Gemini** also runs without a login window (`--providers gemini`): it injects your real
+  Google cookies into a headless browser and scrapes the page (no JSON API exists). This
+  is **best-effort** — Gemini's sidebar is a virtualized, obfuscated Angular list, so a run
+  may capture everything or, on a bad render, little/nothing. For a guaranteed copy of
+  Gemini history use [Google Takeout](https://takeout.google.com) (My Activity → Gemini).
+
+The Playwright/Firefox GUI below still works for providers that aren't behind a hard
+Cloudflare challenge, but cookie-handoff is the path that just works for ChatGPT/Claude.
+
 ## Setup (one time)
 
 You need Python 3.10+ installed. Then, in this folder:
@@ -37,7 +64,7 @@ or manually:
 
 ```
 pip install -r requirements.txt
-python -m playwright install chromium
+python -m playwright install firefox
 ```
 
 ## Run
@@ -64,8 +91,9 @@ working from the packaged app.
 - **Linux:** run `build_app.sh` *on a Linux machine* (PyInstaller can't cross-compile from
   Windows). You get `dist/ChatArchiver/ChatArchiver`. Note: automatic scheduling is
   Windows-only for now (it uses Task Scheduler); everything else works.
-- The build still expects **Google Chrome** to be installed on the target machine (the app
-  drives real Chrome to beat captchas).
+- The packaged app does **not** bundle the Firefox browser — run
+  `python -m playwright install firefox` once on the target machine (it caches Firefox
+  under `~/.cache/ms-playwright`). No Google Chrome required, ever.
 
 ## Automatic export (scheduled)
 
@@ -92,33 +120,33 @@ python headless_export.py
 
 ## Which browser it uses
 
-The app drives a **Chromium-based** browser (that's what the captcha-beating relies on —
-Firefox/Safari use different automation and would hit captchas). It picks one in this
-order:
+The app drives **Mozilla Firefox** — specifically Playwright's own pinned Firefox build
+(`python -m playwright install firefox`). That's a deliberate choice: **no Google Chrome,
+no Chromium, no Google binary or telemetry anywhere in the loop.** There's nothing to
+pick — the engine is fixed, and the same Firefox is used by scheduled background runs.
 
-1. A **custom browser** if you set one (the *Browser (optional)* box) — point it at any
-   Chromium browser's `.exe`: Brave, Vivaldi, Opera, a portable Chromium, etc.
-2. **Google Chrome** (auto-detected)
-3. **Microsoft Edge** (auto-detected; preinstalled on Windows 11)
-4. Bundled Chromium (only if you ran `patchright install chromium`)
-
-Leave the Browser box blank to just auto-detect Chrome/Edge. The setting is saved and is
-also used by scheduled background runs.
+> Why not Chrome? Chrome's automation channel (CDP) is what older versions of this app
+> used to beat captchas, but it meant launching Google's browser. Firefox keeps the whole
+> pipeline off Google. The trade-off: bot-checks (e.g. Cloudflare on ChatGPT) are tuned
+> against *headless* automation. We sidestep that by having you **log in once in a visible
+> Firefox window** — a real human login — after which the headless export just reuses that
+> session. If a headless run ever gets challenged, the app reopens a visible window.
 
 ## Provider status
 
 | Provider | Export | Notes |
 |----------|--------|-------|
-| ChatGPT  | ✅ | Uses chatgpt.com's own backend API via your logged-in session. |
-| Claude   | ✅ | Uses claude.ai's own API via your logged-in session. |
-| Gemini   | 🧪 | Experimental DOM scraper (Google has no API). Login via Patchright works; export reads the rendered page, so selectors may need occasional tuning — a run that saves 0 means the sidebar markup changed. |
+| ChatGPT  | ✅ | Cookie-handoff: replays chatgpt.com's backend API with your browser session. |
+| Claude   | ✅ | Cookie-handoff: replays claude.ai's API with your browser session. |
+| Gemini   | 🧪 | Injects your Google cookies into headless Firefox and scrapes the DOM (no API). Best-effort — a run may capture everything or, on a bad render, little. |
+| DeepSeek, Mistral (Le Chat), Perplexity, Poe, Grok, Copilot | 🚧 WIP | Wired into the UI (rows + "Log in" + login detection), but the per-service list/fetch endpoints aren't implemented yet. Export reports WIP instead of faking success. Each becomes ✅ once its endpoints are implemented + tested against a live login. |
 
 Adding Copilot / DeepSeek / Perplexity / Grok is one new file in `chatarchiver/providers/`.
 
 ## How it works / where things live
 
 - `chatarchiver/app.py` — the Tkinter window.
-- `chatarchiver/playwright_runner.py` — drives Chromium; login + export.
+- `chatarchiver/playwright_runner.py` — drives Firefox; login + export.
 - `chatarchiver/providers/` — one file per chat service. **The site-specific, brittle
   bits live here** — if an export breaks because a site changed, this is what to fix.
 - `chatarchiver/markdown_writer.py` — conversation → Markdown file.
@@ -133,7 +161,11 @@ Adding Copilot / DeepSeek / Perplexity / Grok is one new file in `chatarchiver/p
 - These services have **no official export API**, so the app talks to the same private
   endpoints their own websites use. They can change without notice and break an exporter;
   the fix is localised to one provider file.
-- The export browser window is **visible on purpose** — ChatGPT's bot protection is much
-  more reliable against a real window than a hidden one. Let it do its thing.
+- The **login** window is visible on purpose — a real human sign-in is what gets past
+  bot protection (Cloudflare etc.). The **export** then runs headless on that saved
+  session; if it gets challenged it transparently reopens a visible window.
+- Firefox (not Chrome) is a recent switch to keep Google out of the loop. ChatGPT sits
+  behind Cloudflare, so if a headless export starts returning 0/auth errors, just open the
+  app and **Connect** again to refresh the session.
 - Not yet validated against live accounts on this machine — the first real run may surface
   a field-name tweak in a provider file.

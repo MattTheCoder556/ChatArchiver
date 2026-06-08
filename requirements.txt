@@ -1,4 +1,9 @@
-# Patchright is a drop-in Playwright fork that defeats CDP-based bot detection
-# (Cloudflare Turnstile on ChatGPT/Claude). It pulls in a compatible Playwright too.
-patchright
+# Playwright drives a real Mozilla Firefox build (no Chrome/Chromium, no Google binary).
+# The bundled Firefox is installed separately with:  python -m playwright install firefox
 playwright
+
+# Cookie-handoff export (cookie_export.py) — the path that gets past Cloudflare without
+# any automated browser: reads your everyday browser's session and replays the APIs with a
+# browser-impersonating TLS client.
+curl_cffi
+browser_cookie3
