@@ -96,13 +96,14 @@ class GeminiProvider(Provider):
     def list_conversations(self, page) -> list[ConvMeta]:
         page.goto(self.home_url, wait_until="domcontentloaded", timeout=60000)
         page.wait_for_timeout(3000)            # let the Angular app boot
-        self._expand_history(page)
-        loc = self._list_locator(page)
-        count = loc.count() if loc else 0
-        if not count:
+        loc = self._wait_for_list(page)        # poll (and reveal a collapsed sidebar)
+        if loc is None:
             raise RuntimeError(
                 "Gemini: couldn't find any conversations in the sidebar. The page layout "
                 "likely changed — tell me and I'll adjust the selectors.")
+        self._expand_history(page)
+        loc = self._list_locator(page) or loc
+        count = loc.count()
         metas: list[ConvMeta] = []
         for i in range(count):
             loc = self._list_locator(page) or loc
@@ -143,6 +144,34 @@ class GeminiProvider(Provider):
                     return loc
             except Exception:
                 continue
+        return None
+
+    def _reveal_sidebar(self, page) -> None:
+        """The history sidebar collapses to a hamburger; click it open if the list is hidden."""
+        if self._list_locator(page):
+            return
+        for name in ("Main menu", "Expand menu", "Show side panel", "Menu", "Expand"):
+            try:
+                btn = page.get_by_role("button", name=re.compile(name, re.I))
+                if btn.count() and btn.first.is_visible():
+                    btn.first.click(timeout=2000)
+                    page.wait_for_timeout(1200)
+                    if self._list_locator(page):
+                        return
+            except Exception:
+                continue
+
+    def _wait_for_list(self, page, timeout_s: int = 25):
+        """Poll up to timeout_s for the conversation list to render (Angular is slow to
+        hydrate, and the sidebar may need revealing). Returns a locator or None."""
+        import time
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            loc = self._list_locator(page)
+            if loc and loc.count() > 0:
+                return loc
+            self._reveal_sidebar(page)
+            page.wait_for_timeout(1000)
         return None
 
     def _expand_history(self, page, max_clicks: int = 25) -> None:

@@ -9,38 +9,40 @@ from __future__ import annotations
 import queue
 import threading
 import tkinter as tk
+import webbrowser
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, ttk
 
 from . import scheduler
+from .cookie_fetch import COOKIE_PROVIDERS, WIP_PROVIDER_IDS, site_url
+from .cookie_fetch import export as cookie_export
 from .playwright_runner import open_for_login, run_export
 from .providers import PROVIDERS
 from .sessions import load_config, output_dir_from_config, save_config
 
 _GREY, _AMBER, _GREEN, _RED = "#888888", "#b8860b", "#2e8b22", "#cc0000"
 
-# Browser must be Chromium-based (the captcha-beating drives Chromium via CDP).
-_NON_CHROMIUM = ("firefox", "waterfox", "librewolf", "palemoon", "seamonkey",
-                 "safari", "iexplore", "torbrowser", "tor browser")
-_CHROMIUM = ("chrome", "msedge", "edge", "brave", "vivaldi", "opera", "operagx",
-             "chromium", "thorium", "ungoogled", "arc")
+# ChatGPT/Claude sit behind Cloudflare, which blocks automated browsers — so for those we
+# use cookie-handoff: you log in in your OWN browser and we replay their APIs with your
+# session (see cookie_fetch.py). No Chrome, no Google binary. Other providers (Gemini)
+# still go through the Playwright/Firefox path.
 
 
 class App:
     def __init__(self, root: tk.Tk):
         self.root = root
         root.title("Chat Archiver")
-        root.geometry("680x640")
-        root.minsize(580, 560)
+        root.geometry("700x900")
+        root.minsize(600, 720)
 
         cfg = load_config()
         sched = cfg.get("schedule", {})
 
         self.q: queue.Queue = queue.Queue()
         self.output = tk.StringVar(value=str(output_dir_from_config()))
-        self.browser_path = tk.StringVar(value=cfg.get("browser_path", ""))
         self.status_lbls: dict[str, ttk.Label] = {}
         self.busy: set[str] = set()
+        self._bar_pulsing = False
 
         # scheduling controls
         self.freq = tk.StringVar(value=sched.get("frequency", "Off"))
@@ -62,14 +64,8 @@ class App:
         ttk.Entry(top, textvariable=self.output).pack(side="left", fill="x", expand=True, padx=6)
         ttk.Button(top, text="Choose…", command=self._choose).pack(side="left")
 
-        brow = ttk.Frame(self.root)
-        brow.pack(fill="x", padx=10)
-        ttk.Label(brow, text="Browser (optional):").pack(side="left")
-        ttk.Entry(brow, textvariable=self.browser_path).pack(side="left", fill="x", expand=True, padx=6)
-        ttk.Button(brow, text="Browse…", command=self._choose_browser).pack(side="left")
-        ttk.Button(brow, text="Clear", command=self._clear_browser).pack(side="left", padx=(3, 0))
-        ttk.Label(self.root, text="   Leave blank to auto-detect Chrome or Edge. "
-                                  "Or pick any Chromium browser (Brave, Vivaldi, Opera).",
+        ttk.Label(self.root, text="   ChatGPT/Claude: log in in your own browser, then Export "
+                                  "(no Chrome, no Google binary).",
                   foreground=_GREY).pack(fill="x", padx=10)
 
         box = ttk.LabelFrame(self.root, text="Accounts")
@@ -78,10 +74,11 @@ class App:
             row = ttk.Frame(box)
             row.pack(fill="x", padx=8, pady=6)
             ttk.Label(row, text=prov.label, width=30).pack(side="left")
-            st = ttk.Label(row, text="not connected", foreground=_GREY, width=14)
+            st = ttk.Label(row, text="—", foreground=_GREY, width=16)
             st.pack(side="left")
             self.status_lbls[prov.id] = st
-            ttk.Button(row, text="Connect",
+            connect_label = "Log in" if prov.id in COOKIE_PROVIDERS else "Connect"
+            ttk.Button(row, text=connect_label,
                        command=lambda p=prov: self._connect(p)).pack(side="left", padx=3)
             ttk.Button(row, text="Export",
                        command=lambda p=prov: self._export(p)).pack(side="left", padx=3)
@@ -89,11 +86,15 @@ class App:
         self._build_schedule()
 
         self.prog = ttk.Label(self.root, text="")
-        self.prog.pack(fill="x", **pad)
+        self.prog.pack(fill="x", padx=10, pady=(6, 0))
+
+        self.bar = ttk.Progressbar(self.root, mode="determinate")
+        self.bar.pack(fill="x", padx=10, pady=(2, 6))
 
         self.log = tk.Text(self.root, height=12, wrap="word", state="disabled")
         self.log.pack(fill="both", expand=True, **pad)
-        self._log("Step 1: Connect an account (log in once). Step 2: Export.")
+        self._log("ChatGPT/Claude: click 'Log in' (opens the site in your browser), sign in, "
+                  "then 'Export'. No re-login needed once your browser has the session.")
 
     def _build_schedule(self) -> None:
         box = ttk.LabelFrame(self.root, text="Automatic export (runs in the background)")
@@ -155,37 +156,9 @@ class App:
             self.output.set(d)
             self._persist_output()
 
-    def _choose_browser(self) -> None:
-        f = filedialog.askopenfilename(
-            title="Pick a Chromium-based browser (.exe)",
-            initialdir=r"C:\Program Files",
-            filetypes=[("Programs", "*.exe"), ("All files", "*.*")])
-        if not f:
-            return
-        name = Path(f).name.lower()
-        if any(b in name for b in _NON_CHROMIUM):
-            messagebox.showerror(
-                "Not a Chromium browser",
-                f"{Path(f).name} isn't Chromium-based, so the app can't control it — "
-                "that's why it opened but the page never loaded.\n\n"
-                "Pick a Chromium-based browser instead: Chrome, Edge, Brave, Vivaldi or "
-                "Opera. (Or use Clear to auto-detect Chrome/Edge.)")
-            return
-        self.browser_path.set(f)
-        self._persist_output()
-        note = "" if any(b in name for b in _CHROMIUM) else \
-            "  — heads up: if this isn't Chromium-based, captchas will fail"
-        self._log(f"[browser] Will use: {f}{note}")
-
-    def _clear_browser(self) -> None:
-        self.browser_path.set("")
-        self._persist_output()
-        self._log("[browser] Cleared — back to auto-detect (Chrome / Edge).")
-
     def _persist_output(self) -> None:
         cfg = load_config()
         cfg["output_dir"] = self.output.get()
-        cfg["browser_path"] = self.browser_path.get().strip()
         save_config(cfg)
 
     def _log(self, msg: str) -> None:
@@ -202,6 +175,19 @@ class App:
                     self._log(payload)
                 elif kind == "prog":
                     self.prog.configure(text=payload)
+                elif kind == "bar":
+                    done, total = payload
+                    if total is None:                 # working, count not known yet → pulse
+                        if not self._bar_pulsing:
+                            self.bar.configure(mode="indeterminate")
+                            self.bar.start(12)
+                            self._bar_pulsing = True
+                    else:
+                        if self._bar_pulsing:
+                            self.bar.stop()
+                            self._bar_pulsing = False
+                        self.bar.configure(mode="determinate", maximum=max(total, 1))
+                        self.bar["value"] = done
                 elif kind == "status":
                     pid, text, color = payload
                     self.status_lbls[pid].configure(text=text, foreground=color)
@@ -225,7 +211,6 @@ class App:
         cfg = load_config()
         cfg["schedule"] = {"frequency": freq, "day": day, "time": time_, "interval": n}
         cfg["output_dir"] = self.output.get()      # the scheduled run reads this
-        cfg["browser_path"] = self.browser_path.get().strip()
         save_config(cfg)
 
         def work():
@@ -271,6 +256,8 @@ class App:
     def _connect(self, prov) -> None:
         if prov.id in self.busy:
             return
+        if prov.id in COOKIE_PROVIDERS:
+            return self._connect_cookie(prov)
         self.busy.add(prov.id)
 
         def work():
@@ -294,9 +281,43 @@ class App:
 
         threading.Thread(target=work, daemon=True).start()
 
+    def _connect_cookie(self, prov) -> None:
+        """Cookie-handoff 'Log in': open the site in the user's own browser, then check
+        whether a live session is now readable from it."""
+        self.busy.add(prov.id)
+
+        def work():
+            self._post("status", (prov.id, "opening site…", _AMBER))
+            try:
+                webbrowser.open(site_url(prov.id))
+            except Exception:
+                pass
+            self._post("log", f"[{prov.label}] Opened {prov.id} in your browser — "
+                              f"log in there if needed, then click Export.")
+            if prov.id == "gemini" or prov.id in WIP_PROVIDER_IDS:
+                # Gemini check needs a headless browser; WIP providers have no exporter yet.
+                # Either way, just confirm the session when you Export.
+                label = "WIP — log in, then Export" if prov.id in WIP_PROVIDER_IDS \
+                    else "log in, then Export"
+                self._post("status", (prov.id, label, _GREY))
+                self.busy.discard(prov.id)
+                return
+            res = cookie_export(providers=(prov.id,), write=False,
+                                log=lambda m: self._post("log", m))
+            self.busy.discard(prov.id)
+            r = res.get(prov.id) or {}
+            if "error" in r or not r:
+                self._post("status", (prov.id, "log in, then Export", _GREY))
+            else:
+                self._post("status", (prov.id, "session found ✓", _GREEN))
+
+        threading.Thread(target=work, daemon=True).start()
+
     def _export(self, prov) -> None:
         if prov.id in self.busy:
             return
+        if prov.id in COOKIE_PROVIDERS:
+            return self._export_cookie(prov)
         self.busy.add(prov.id)
         self._persist_output()
         out = Path(self.output.get())
@@ -327,6 +348,47 @@ class App:
                        + (f", {s['failed']} failed" if s.get("failed") else ""))
             self._post("log", f"[{prov.label}] Done — {summary} (of {s['total']}) → {s['out_dir']}")
             self._post("status", (prov.id, "connected ✓", _GREEN))
+            self._post("prog", f"{prov.label}: {summary}")
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _export_cookie(self, prov) -> None:
+        """Cookie-handoff export: read the user's browser session, replay the API."""
+        self.busy.add(prov.id)
+        self._persist_output()
+        out = self.output.get()
+
+        def work():
+            if prov.id in WIP_PROVIDER_IDS:
+                self._post("status", (prov.id, "WIP", _AMBER))
+                cookie_export(providers=(prov.id,), write=False,
+                              log=lambda m: self._post("log", m))
+                self._post("status", (prov.id, "WIP — not wired yet", _GREY))
+                self.busy.discard(prov.id)
+                return
+            self._post("status", (prov.id, "exporting…", _AMBER))
+            self._post("prog", f"{prov.label}: reading your browser session…")
+            self._post("bar", (0, None))               # pulse until the count is known
+
+            def progress(done, total, title):
+                self._post("bar", (done, total))
+                self._post("prog", f"{prov.label}: {done}/{total} — {title[:42]}")
+
+            res = cookie_export(providers=(prov.id,), out_dir=out, write=True,
+                                log=lambda m: self._post("log", m), progress=progress)
+            self.busy.discard(prov.id)
+            r = res.get(prov.id) or {}
+            if "error" in r:
+                self._post("status", (prov.id, "error", _RED))
+                self._post("prog", "")
+                self._post("bar", (0, 1))              # reset
+                return
+            summary = (f"{r.get('new', 0)} new, {r.get('updated', 0)} updated, "
+                       f"{r.get('unchanged', 0)} unchanged"
+                       + (f", {r['failed']} failed" if r.get("failed") else ""))
+            total = r.get("total", 0) or 1
+            self._post("bar", (total, total))          # fill to 100%
+            self._post("status", (prov.id, "done ✓", _GREEN))
             self._post("prog", f"{prov.label}: {summary}")
 
         threading.Thread(target=work, daemon=True).start()
