@@ -34,8 +34,4 @@ def _make(pid: str, label: str, home: str) -> _WIPProvider:
 # Order here = order shown under the working providers in the window.
 WIP_PROVIDERS = [
     _make("deepseek",   "DeepSeek (WIP)",          "https://chat.deepseek.com/"),
-    _make("mistral",    "Mistral · Le Chat (WIP)", "https://chat.mistral.ai/"),
-    _make("perplexity", "Perplexity (WIP)",        "https://www.perplexity.ai/"),
-    _make("poe",        "Poe (WIP)",               "https://poe.com/"),
-    _make("copilot",    "Copilot (WIP)",           "https://copilot.microsoft.com/"),
 ]

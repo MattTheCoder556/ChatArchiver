@@ -48,17 +48,13 @@ _DOMAIN = {
     "chatgpt": "chatgpt.com",
     "claude": "claude.ai",
     "gemini": "gemini.google.com",
+    "grok": "grok.com",
     # WIP — wired into the UI; list/fetch endpoints not implemented/verified yet.
     "deepseek": "chat.deepseek.com",
-    "mistral": "chat.mistral.ai",
-    "perplexity": "www.perplexity.ai",
-    "poe": "poe.com",
-    "grok": "grok.com",
-    "copilot": "copilot.microsoft.com",
 }
 
 # Not yet implemented end-to-end: shown in the app, detect login, but export is stubbed.
-WIP_PROVIDER_IDS = ("deepseek", "mistral", "perplexity", "poe", "copilot")
+WIP_PROVIDER_IDS = ("deepseek",)
 
 # Providers the GUI routes through cookie-handoff instead of a Playwright login window.
 # ChatGPT/Claude: pure HTTP (they have JSON APIs). Gemini: no API, so we inject your real
