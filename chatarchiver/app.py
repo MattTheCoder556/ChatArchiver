@@ -15,6 +15,11 @@ import webbrowser
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+try:
+    from PIL import Image, ImageTk          # real brand logos (rendered/resized via Pillow)
+except Exception:                            # pragma: no cover - fall back to coloured dots
+    Image = ImageTk = None
+
 from . import exe_updater, scheduler
 from .cookie_fetch import COOKIE_PROVIDERS, WIP_PROVIDER_IDS, session_status, site_url
 from .cookie_fetch import export as cookie_export
@@ -22,7 +27,29 @@ from .playwright_runner import open_for_login, run_export
 from .providers import PROVIDERS
 from .sessions import load_config, output_dir_from_config, save_config
 
-_GREY, _AMBER, _GREEN, _RED = "#888888", "#b8860b", "#2e8b22", "#cc0000"
+# Status text colors, tuned to stay readable on both the light and dark Sun Valley themes.
+_GREY, _AMBER, _GREEN, _RED = "#8a8f98", "#d18f00", "#2e9e3f", "#e03131"
+_MUTED = "#8a8f98"
+
+# The log is a classic tk.Text (not a ttk widget), so sv-ttk doesn't theme it — we colour
+# it ourselves to match whichever theme is active.
+_TEXT_LIGHT = {"bg": "#ffffff", "fg": "#1a1a1a", "sel": "#cce4ff", "border": "#d7d7d7"}
+_TEXT_DARK = {"bg": "#1b1b1b", "fg": "#e8e8e8", "sel": "#2f5d8a", "border": "#3a3a3a"}
+
+# The app's own brand accent — the colour of the header band (constant across themes).
+_ACCENT = "#4f46e5"          # indigo
+_ACCENT_HI = "#c7d2fe"       # light indigo, for the secondary text on the band
+_ON_ACCENT = "#ffffff"
+
+# Each provider shown as a dot in ITS service's brand colour. grok's near-black needs a
+# light variant on the dark theme, so dot colours are (light_theme, dark_theme) pairs.
+_BRAND = {
+    "chatgpt":  ("#10a37f", "#10a37f"),   # OpenAI teal-green
+    "claude":   ("#d97757", "#d97757"),   # Anthropic clay
+    "gemini":   ("#4285f4", "#4285f4"),   # Google blue
+    "grok":     ("#111111", "#e8e8e8"),   # xAI black / white on dark
+    "deepseek": ("#4d6bfe", "#4d6bfe"),   # DeepSeek blue
+}
 
 # ChatGPT/Claude sit behind Cloudflare, which blocks automated browsers — so for those we
 # use cookie-handoff: you log in in your OWN browser and we replay their APIs with your
@@ -34,8 +61,8 @@ class App:
     def __init__(self, root: tk.Tk):
         self.root = root
         root.title("Chat Archiver")
-        root.geometry("700x900")
-        root.minsize(600, 720)
+        root.geometry("720x880")
+        root.minsize(640, 740)
 
         cfg = load_config()
         sched = cfg.get("schedule", {})
@@ -45,6 +72,8 @@ class App:
         self.status_lbls: dict[str, ttk.Label] = {}
         self.busy: set[str] = set()
         self._bar_pulsing = False
+        self.dark = tk.BooleanVar(value=cfg.get("theme") == "dark")
+        self._imgs: list = []                # keep PhotoImage refs alive (else tk GCs them)
 
         # scheduling controls
         self.freq = tk.StringVar(value=sched.get("frequency", "Off"))
@@ -61,65 +90,189 @@ class App:
             self.root.after(1500, lambda: self._check_updates(announce=False))
 
     # ---- layout ----
+    def _configure_styles(self) -> None:
+        """App-specific ttk styles on top of the Sun Valley theme. Re-applied whenever the
+        theme changes, since switching themes resets style options."""
+        style = ttk.Style()
+        style.configure("Title.TLabel", font=("Segoe UI Semibold", 18))
+        style.configure("CardTitle.TLabel", font=("Segoe UI Semibold", 11))
+        style.configure("Muted.TLabel", foreground=_MUTED)
+
+    def _asset_path(self, name: str) -> str:
+        """Locate a bundled logo whether running from source or a PyInstaller build."""
+        base = getattr(sys, "_MEIPASS", None)
+        if base:                                       # frozen: datas land under _MEIPASS
+            return os.path.join(base, "chatarchiver", "assets", "logos", name)
+        return os.path.join(os.path.dirname(__file__), "assets", "logos", name)
+
+    def _logo(self, name: str, size: int):
+        """Return a square PhotoImage for <name>.png at <size>px, or None if unavailable
+        (Pillow missing / file absent) so callers can fall back to a coloured dot."""
+        if ImageTk is None:
+            return None
+        try:
+            im = Image.open(self._asset_path(f"{name}.png")).convert("RGBA")
+            im = im.resize((size, size), Image.LANCZOS)
+            ph = ImageTk.PhotoImage(im)
+            self._imgs.append(ph)                      # prevent garbage collection
+            return ph
+        except Exception:
+            return None
+
+    def _build_header(self) -> None:
+        """The branded accent band across the top: mark + wordmark + version, and a
+        click-to-toggle theme control on the right. Built from tk widgets so the solid
+        accent background and white text render reliably regardless of the ttk theme."""
+        from . import __version__
+
+        band = tk.Frame(self.root, background=_ACCENT)
+        band.pack(fill="x")
+        inner = tk.Frame(band, background=_ACCENT)
+        inner.pack(fill="x", padx=18, pady=14)
+
+        left = tk.Frame(inner, background=_ACCENT)
+        left.pack(side="left")
+        applogo = self._logo("app", 30)
+        if applogo:
+            tk.Label(left, image=applogo, background=_ACCENT).pack(side="left", padx=(0, 10))
+        else:                                          # fallback: a typographic mark
+            tk.Label(left, text="▌", background=_ACCENT, foreground=_ON_ACCENT,
+                     font=("Segoe UI", 18, "bold")).pack(side="left", padx=(0, 4))
+        tk.Label(left, text="CHAT ARCHIVER", background=_ACCENT, foreground=_ON_ACCENT,
+                 font=("Segoe UI Semibold", 15)).pack(side="left")
+        tk.Label(left, text=f"v{__version__}", background=_ACCENT, foreground=_ACCENT_HI,
+                 font=("Segoe UI", 9)).pack(side="left", anchor="s", padx=(8, 0), pady=(0, 2))
+
+        self.theme_toggle = tk.Label(inner, background=_ACCENT, foreground=_ON_ACCENT,
+                                     font=("Segoe UI", 10), cursor="hand2")
+        self.theme_toggle.pack(side="right", anchor="e")
+        self.theme_toggle.bind("<Button-1>", self._on_toggle_theme)
+        self._update_toggle_label()
+
+    def _card(self, parent, title: str, expand: bool = False) -> ttk.Frame:
+        """A titled section drawn as a Sun Valley 'card'. Returns the content frame."""
+        ttk.Label(parent, text=title, style="CardTitle.TLabel").pack(anchor="w", pady=(10, 4))
+        card = ttk.Frame(parent, style="Card.TFrame", padding=14)
+        card.pack(fill="both" if expand else "x", expand=expand)
+        return card
+
     def _build(self) -> None:
-        pad = {"padx": 10, "pady": 6}
+        self._configure_styles()
 
-        top = ttk.Frame(self.root)
-        top.pack(fill="x", **pad)
-        ttk.Label(top, text="Save Markdown to:").pack(side="left")
-        ttk.Entry(top, textvariable=self.output).pack(side="left", fill="x", expand=True, padx=6)
-        ttk.Button(top, text="Choose…", command=self._choose).pack(side="left")
+        # ---- branded header band (full-bleed accent colour, white text) ----
+        # A tk.Frame (not ttk) so we control the solid background directly; it spans the
+        # window edge-to-edge above the padded content.
+        self._build_header()
 
-        ttk.Label(self.root, text="   ChatGPT/Claude: log in in your own browser, then Export "
-                                  "(no Chrome, no Google binary).",
-                  foreground=_GREY).pack(fill="x", padx=10)
+        outer = ttk.Frame(self.root, padding=16)
+        outer.pack(fill="both", expand=True)
 
-        btns = ttk.Frame(self.root)
-        btns.pack(anchor="w", padx=10, pady=(2, 0))
-        ttk.Button(btns, text="↻ Refresh sessions",
-                   command=self._refresh_sessions).pack(side="left")
-        ttk.Button(btns, text="⇩ Check for updates",
-                   command=self._check_updates).pack(side="left", padx=6)
+        # ---- save-to card ----
+        save = self._card(outer, "Save Markdown to")
+        srow = ttk.Frame(save)
+        srow.pack(fill="x")
+        ttk.Entry(srow, textvariable=self.output).pack(side="left", fill="x", expand=True)
+        ttk.Button(srow, text="Choose…", command=self._choose).pack(side="left", padx=(8, 0))
 
-        box = ttk.LabelFrame(self.root, text="Accounts")
-        box.pack(fill="x", **pad)
-        for prov in PROVIDERS.values():
-            row = ttk.Frame(box)
-            row.pack(fill="x", padx=8, pady=6)
-            ttk.Label(row, text=prov.label, width=30).pack(side="left")
-            st = ttk.Label(row, text="—", foreground=_GREY, width=16)
-            st.pack(side="left")
+        # ---- accounts card ----
+        acc = self._card(outer, "Accounts")
+        ttk.Label(acc, text="Log in in your own browser, then Export — no Chrome or Google "
+                            "binary needed.", style="Muted.TLabel").pack(anchor="w", pady=(0, 10))
+        grid = ttk.Frame(acc)
+        grid.pack(fill="x")
+        grid.columnconfigure(0, weight=0)          # brand dot
+        grid.columnconfigure(1, weight=1)          # provider name takes the slack
+        grid.columnconfigure(2, minsize=150)       # status column
+        self.dot_lbls: dict[str, ttk.Label] = {}     # only the fallback text dots, if any
+        for i, prov in enumerate(PROVIDERS.values()):
+            logo = self._logo(prov.id, 22)
+            if logo:
+                ttk.Label(grid, image=logo).grid(row=i, column=0, sticky="w", padx=(0, 10))
+            else:                                      # fallback: a brand-coloured dot
+                dot = ttk.Label(grid, text="●", font=("Segoe UI", 11))
+                dot.grid(row=i, column=0, sticky="w", padx=(0, 10))
+                self.dot_lbls[prov.id] = dot
+            ttk.Label(grid, text=prov.label).grid(row=i, column=1, sticky="w", pady=5)
+            st = ttk.Label(grid, text="—", foreground=_GREY)
+            st.grid(row=i, column=2, sticky="w", padx=10)
             self.status_lbls[prov.id] = st
             connect_label = "Log in" if prov.id in COOKIE_PROVIDERS else "Connect"
-            ttk.Button(row, text=connect_label,
-                       command=lambda p=prov: self._connect(p)).pack(side="left", padx=3)
-            ttk.Button(row, text="Export",
-                       command=lambda p=prov: self._export(p)).pack(side="left", padx=3)
+            ttk.Button(grid, text=connect_label, width=10,
+                       command=lambda p=prov: self._connect(p)).grid(row=i, column=3,
+                                                                     padx=(0, 6), pady=5)
+            ttk.Button(grid, text="Export", width=10, style="Accent.TButton",
+                       command=lambda p=prov: self._export(p)).grid(row=i, column=4, pady=5)
+        self._apply_brand_dots()
 
-        self._build_schedule()
+        tools = ttk.Frame(acc)
+        tools.pack(fill="x", pady=(12, 0))
+        ttk.Button(tools, text="↻ Refresh sessions",
+                   command=self._refresh_sessions).pack(side="left")
+        ttk.Button(tools, text="⇩ Check for updates",
+                   command=self._check_updates).pack(side="left", padx=8)
 
-        self.prog = ttk.Label(self.root, text="")
-        self.prog.pack(fill="x", padx=10, pady=(6, 0))
+        # ---- schedule card ----
+        self._build_schedule(outer)
 
-        self.bar = ttk.Progressbar(self.root, mode="determinate")
-        self.bar.pack(fill="x", padx=10, pady=(2, 6))
+        # ---- activity / log card (grows to fill the window) ----
+        activity = self._card(outer, "Activity", expand=True)
+        self.prog = ttk.Label(activity, text="", style="Muted.TLabel")
+        self.prog.pack(fill="x")
+        self.bar = ttk.Progressbar(activity, mode="determinate")
+        self.bar.pack(fill="x", pady=(6, 10))
+        logwrap = ttk.Frame(activity)
+        logwrap.pack(fill="both", expand=True)
+        self.log = tk.Text(logwrap, height=8, wrap="word", state="disabled",
+                           relief="flat", borderwidth=0, highlightthickness=1,
+                           font=("Consolas", 9), padx=10, pady=8)
+        scroll = ttk.Scrollbar(logwrap, command=self.log.yview)
+        self.log.configure(yscrollcommand=scroll.set)
+        scroll.pack(side="right", fill="y")
+        self.log.pack(side="left", fill="both", expand=True)
+        self._apply_text_theme()
 
-        self.log = tk.Text(self.root, height=12, wrap="word", state="disabled")
-        self.log.pack(fill="both", expand=True, **pad)
-        self._log("ChatGPT/Claude: click 'Log in' (opens the site in your browser), sign in, "
-                  "then 'Export'. No re-login needed once your browser has the session.")
-
+        self._log("Click 'Log in' to open a site in your browser, sign in, then 'Export'. "
+                  "No re-login needed once your browser has the session.")
         # run.py pulls the latest source on launch and leaves the outcome here; show it once.
         upd = os.environ.pop("CHATARCHIVER_UPDATE_MSG", "")
         if upd:
             self._log(f"[update] {upd}")
 
-    def _build_schedule(self) -> None:
-        box = ttk.LabelFrame(self.root, text="Automatic export (runs in the background)")
-        box.pack(fill="x", padx=10, pady=6)
+    def _on_toggle_theme(self, *_) -> None:
+        """Header toggle clicked: flip dark mode, re-theme, and remember the choice."""
+        self.dark.set(not self.dark.get())
+        import sv_ttk
+        sv_ttk.set_theme("dark" if self.dark.get() else "light")
+        self._configure_styles()                   # set_theme resets our custom styles
+        self._apply_text_theme()
+        self._apply_brand_dots()
+        self._update_toggle_label()
+        cfg = load_config()
+        cfg["theme"] = "dark" if self.dark.get() else "light"
+        save_config(cfg)
+
+    def _update_toggle_label(self) -> None:
+        # ◐ renders reliably in tk (geometric shapes), unlike colour emoji.
+        self.theme_toggle.configure(text="◐  Light mode" if self.dark.get() else "◐  Dark mode")
+
+    def _apply_brand_dots(self) -> None:
+        """Colour each provider's dot in its brand colour for the active theme."""
+        idx = 1 if self.dark.get() else 0
+        for pid, lbl in self.dot_lbls.items():
+            lbl.configure(foreground=_BRAND.get(pid, (_GREY, _GREY))[idx])
+
+    def _apply_text_theme(self) -> None:
+        """Colour the (non-ttk) log Text widget to match the active theme."""
+        c = _TEXT_DARK if self.dark.get() else _TEXT_LIGHT
+        self.log.configure(bg=c["bg"], fg=c["fg"], insertbackground=c["fg"],
+                           selectbackground=c["sel"], highlightbackground=c["border"],
+                           highlightcolor=c["border"])
+
+    def _build_schedule(self, parent) -> None:
+        box = self._card(parent, "Automatic export (runs in the background)")
 
         row = ttk.Frame(box)
-        row.pack(fill="x", padx=8, pady=6)
+        row.pack(fill="x")
 
         # All widgets live in one grid; _update_schedule_fields shows/hides per frequency.
         ttk.Label(row, text="Run:").grid(row=0, column=0, sticky="w")
@@ -144,8 +297,8 @@ class App:
         self.w_time.grid(row=0, column=8)
         ttk.Button(row, text="Apply", command=self._apply_schedule).grid(row=0, column=9, padx=10)
 
-        self.sched_lbl = ttk.Label(box, text="", foreground=_GREY)
-        self.sched_lbl.pack(fill="x", padx=8, pady=(0, 6))
+        self.sched_lbl = ttk.Label(box, text="", style="Muted.TLabel")
+        self.sched_lbl.pack(fill="x", pady=(10, 0))
         self._update_schedule_fields()
 
     def _update_schedule_fields(self) -> None:
@@ -527,9 +680,16 @@ class App:
 
 def main() -> None:
     root = tk.Tk()
+    root.title("Chat Archiver")
+    # Sun Valley gives ttk a modern Windows 11 look; fall back to a native theme if it's
+    # somehow unavailable (e.g. theme data missing from a build).
     try:
-        ttk.Style().theme_use("vista")
+        import sv_ttk
+        sv_ttk.set_theme(load_config().get("theme", "light"))
     except Exception:
-        pass
+        try:
+            ttk.Style().theme_use("vista")
+        except Exception:
+            pass
     App(root)
     root.mainloop()

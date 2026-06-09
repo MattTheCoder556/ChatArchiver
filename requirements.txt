@@ -7,3 +7,9 @@ playwright
 # browser-impersonating TLS client.
 curl_cffi
 browser_cookie3
+
+# Sun Valley ttk theme — the modern Windows 11 look for the desktop window.
+sv-ttk
+
+# Renders/resizes the bundled provider + app logos for the window (tk only shows bitmaps).
+Pillow

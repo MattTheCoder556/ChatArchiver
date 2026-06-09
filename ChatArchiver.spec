@@ -9,16 +9,25 @@ itself is NOT bundled — it lives in the user's Playwright cache; run
 Build:  pyinstaller --noconfirm ChatArchiver.spec
 Output: dist/ChatArchiver/ChatArchiver.exe
 """
+import os
 from PyInstaller.utils.hooks import collect_all
 
 datas, binaries, hiddenimports = [], [], []
 # playwright: bundled driver (Gemini path). curl_cffi: compiled TLS libs + cert bundle.
 # browser_cookie3: reads the user's browser session for the cookie-handoff path.
-for _pkg in ("playwright", "curl_cffi", "browser_cookie3"):
+# sv_ttk: the Sun Valley theme ships .tcl files that must travel with the exe.
+# PIL: renders the bundled provider/app logos in the window.
+for _pkg in ("playwright", "curl_cffi", "browser_cookie3", "sv_ttk", "PIL"):
     _d, _b, _h = collect_all(_pkg)
     datas += _d
     binaries += _b
     hiddenimports += _h
+
+# Bundle the brand/app logo PNGs, preserving their package-relative path so the app's
+# _asset_path() (which looks under <bundle>/chatarchiver/assets/logos) finds them.
+_logos = os.path.join("chatarchiver", "assets", "logos")
+datas += [(os.path.join(_logos, _f), _logos)
+          for _f in os.listdir(_logos) if _f.endswith(".png")]
 
 a = Analysis(
     ['main.py'],
