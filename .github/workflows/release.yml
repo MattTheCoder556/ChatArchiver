@@ -1,0 +1,60 @@
+name: Build & release Windows exe
+
+# Every push to main produces a fresh one-folder PyInstaller build and publishes it as a
+# GitHub Release. The packaged app's auto-updater (chatarchiver/exe_updater.py) checks this
+# repo's "latest" release on launch and swaps itself in place when a newer version exists.
+# Version = 0.1.<run_number>, which increases monotonically so the compare always works.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:        # allow a manual build from the Actions tab too
+
+permissions:
+  contents: write           # required to create releases / push tags
+
+concurrency:                # one release build at a time; cancel superseded pushes
+  group: release
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Compute version and stamp it into the build
+        shell: pwsh
+        run: |
+          $v = "0.1.${{ github.run_number }}"
+          "__version__ = `"$v`"" | Out-File -Encoding utf8 chatarchiver/_version.py
+          "VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Building version $v"
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pyinstaller
+
+      - name: Build exe
+        shell: pwsh
+        run: python -m PyInstaller --noconfirm ChatArchiver.spec
+
+      - name: Package
+        shell: pwsh
+        run: Compress-Archive -Path dist/ChatArchiver -DestinationPath "ChatArchiver-$env:VERSION.zip" -Force
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v$env:VERSION" "ChatArchiver-$env:VERSION.zip" `
+            --title "v$env:VERSION" `
+            --notes "Automated build of commit ${{ github.sha }}."

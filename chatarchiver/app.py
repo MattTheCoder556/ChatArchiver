@@ -6,14 +6,16 @@ window responsive while a browser is doing its thing.
 """
 from __future__ import annotations
 
+import os
 import queue
+import sys
 import threading
 import tkinter as tk
 import webbrowser
 from pathlib import Path
-from tkinter import filedialog, ttk
+from tkinter import filedialog, messagebox, ttk
 
-from . import scheduler
+from . import exe_updater, scheduler
 from .cookie_fetch import COOKIE_PROVIDERS, WIP_PROVIDER_IDS, session_status, site_url
 from .cookie_fetch import export as cookie_export
 from .playwright_runner import open_for_login, run_export
@@ -53,6 +55,10 @@ class App:
         self._build()
         self.root.after(100, self._drain)
         self._refresh_schedule_status()
+        # Frozen .exe: quietly check GitHub Releases on launch and offer any newer build.
+        # (Source runs already auto-updated via git in run.py before this window opened.)
+        if exe_updater.is_frozen():
+            self.root.after(1500, lambda: self._check_updates(announce=False))
 
     # ---- layout ----
     def _build(self) -> None:
@@ -68,8 +74,12 @@ class App:
                                   "(no Chrome, no Google binary).",
                   foreground=_GREY).pack(fill="x", padx=10)
 
-        ttk.Button(self.root, text="↻ Refresh sessions",
-                   command=self._refresh_sessions).pack(anchor="w", padx=10, pady=(2, 0))
+        btns = ttk.Frame(self.root)
+        btns.pack(anchor="w", padx=10, pady=(2, 0))
+        ttk.Button(btns, text="↻ Refresh sessions",
+                   command=self._refresh_sessions).pack(side="left")
+        ttk.Button(btns, text="⇩ Check for updates",
+                   command=self._check_updates).pack(side="left", padx=6)
 
         box = ttk.LabelFrame(self.root, text="Accounts")
         box.pack(fill="x", **pad)
@@ -98,6 +108,11 @@ class App:
         self.log.pack(fill="both", expand=True, **pad)
         self._log("ChatGPT/Claude: click 'Log in' (opens the site in your browser), sign in, "
                   "then 'Export'. No re-login needed once your browser has the session.")
+
+        # run.py pulls the latest source on launch and leaves the outcome here; show it once.
+        upd = os.environ.pop("CHATARCHIVER_UPDATE_MSG", "")
+        if upd:
+            self._log(f"[update] {upd}")
 
     def _build_schedule(self) -> None:
         box = ttk.LabelFrame(self.root, text="Automatic export (runs in the background)")
@@ -197,6 +212,12 @@ class App:
                 elif kind == "sched":
                     text, color = payload
                     self.sched_lbl.configure(text=text, foreground=color)
+                elif kind == "ask_restart":
+                    self._prompt_restart(payload)
+                elif kind == "ask_exe_update":
+                    self._prompt_exe_update(*payload)
+                elif kind == "apply_exe_update":
+                    self._apply_exe_update(payload)
         except queue.Empty:
             pass
         self.root.after(100, self._drain)
@@ -273,6 +294,95 @@ class App:
             self._post("log", "[refresh] Done.")
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _check_updates(self, announce: bool = True) -> None:
+        """Check for a newer version. Two code paths depending on how we're running:
+
+          • frozen .exe  -> compare against the latest GitHub Release; if newer, offer to
+                            download it and swap the install in place (exe_updater).
+          • from source  -> git fast-forward this checkout (updater.self_update).
+
+        Source launches also auto-update via run.py; the frozen build auto-checks on launch
+        (see __init__). `announce=False` keeps the background check quiet unless it finds one."""
+        def work():
+            if announce:
+                self._post("log", "[update] Checking GitHub for a newer version…")
+            if exe_updater.is_frozen():
+                try:
+                    avail, ver, url = exe_updater.check()
+                except Exception as e:
+                    if announce:
+                        self._post("log", f"[update] check failed: {e}")
+                    return
+                if not avail:
+                    if announce:
+                        self._post("log", f"[update] up to date "
+                                          f"(v{exe_updater.current_version()}).")
+                    return
+                self._post("log", f"[update] version {ver} is available.")
+                self._post("ask_exe_update", (ver, url))
+                return
+            # running from source: git fast-forward
+            try:
+                from .updater import is_git_checkout, self_update
+            except Exception as e:
+                if announce:
+                    self._post("log", f"[update] unavailable: {e}")
+                return
+            if not is_git_checkout():
+                if announce:
+                    self._post("log", "[update] not a git checkout or packaged build — "
+                                      "nothing to update.")
+                return
+            try:
+                updated, msg = self_update(log=lambda m: self._post("log", m))
+            except Exception as e:
+                self._post("log", f"[update] error: {e}")
+                return
+            if announce:
+                self._post("log", f"[update] {msg}" if msg else "[update] already up to date.")
+            if updated:
+                self._post("ask_restart", msg)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _prompt_restart(self, msg: str) -> None:
+        """Ask (on the main thread) whether to relaunch so the pulled code takes effect."""
+        if messagebox.askyesno("Update applied",
+                               f"Chat Archiver was {msg}.\n\nRestart now to use the new "
+                               "version?"):
+            os.environ["CHATARCHIVER_NO_UPDATE"] = "1"   # just pulled; don't re-check on boot
+            os.environ.pop("CHATARCHIVER_UPDATED", "")
+            self.root.destroy()
+            os.execv(sys.executable, [sys.executable, *sys.argv])
+
+    def _prompt_exe_update(self, ver: str, url: str) -> None:
+        """Frozen build: confirm, then download in the background and hand off to the swap
+        helper. We only download after the user agrees, so launch stays fast."""
+        if not messagebox.askyesno("Update available",
+                                   f"Version {ver} is available "
+                                   f"(you have {exe_updater.current_version()}).\n\n"
+                                   "Download and install now? The app will close and reopen."):
+            return
+
+        def work():
+            try:
+                new_dir = exe_updater.download_and_stage(url, lambda m: self._post("log", m))
+            except Exception as e:
+                self._post("log", f"[update] download failed: {e}")
+                return
+            self._post("apply_exe_update", str(new_dir))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _apply_exe_update(self, new_dir: str) -> None:
+        """Spawn the detached swap helper, then quit so it can overwrite the running exe."""
+        try:
+            exe_updater.apply(Path(new_dir), lambda m: self._post("log", m))
+        except Exception as e:
+            self._post("log", f"[update] install failed: {e}")
+            return
+        self.root.after(400, self.root.destroy)   # let the log line render, then exit
 
     def _connect(self, prov) -> None:
         if prov.id in self.busy:
