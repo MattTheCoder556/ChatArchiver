@@ -89,16 +89,17 @@ the scheduled background export (it calls itself with `--export`), so scheduling
 working from the packaged app.
 
 - **Linux:** run `build_app.sh` *on a Linux machine* (PyInstaller can't cross-compile from
-  Windows). You get `dist/ChatArchiver/ChatArchiver`. Note: automatic scheduling is
-  Windows-only for now (it uses Task Scheduler); everything else works.
+  Windows). You get `dist/ChatArchiver/ChatArchiver`. Automatic scheduling works here too
+  (via a systemd **user** timer — see below).
 - The packaged app does **not** bundle the Firefox browser — run
   `python -m playwright install firefox` once on the target machine (it caches Firefox
   under `~/.cache/ms-playwright`). No Google Chrome required, ever.
 
 ## Automatic export (scheduled)
 
-The **Automatic export** section in the window registers a Windows scheduled task that
-runs the exporter in the background — even when the app is closed.
+The **Automatic export** section in the window registers an OS-level background task that
+runs the exporter — **even when the app window is closed**. Works on both Windows and
+Linux.
 
 - Pick a frequency, then **Apply**. (Choose **Off** + Apply to cancel.) The controls
   change to match:
@@ -107,16 +108,34 @@ runs the exporter in the background — even when the app is closed.
   - **Weekly** — `on [weekday] at [HH:MM]`
 - At the scheduled time the headless exporter runs every connected account incrementally
   (no window appears) and writes a log to `~/.chatarchiver/logs/`.
-- It runs while you're logged into Windows; no admin rights needed. If a login has
-  expired it logs "needs Connect" and skips that account (it won't pop a window
-  unattended) — just open the app and Connect again.
+- No admin/root needed. If a login has expired it logs the account as needing a re-login
+  and skips it (it won't pop a window unattended) — just open the app and Connect again.
 
-Under the hood this is a `schtasks` task named `ChatArchiverExport` that launches
-`headless_export.py` via `pythonw`. You can also run a manual headless export any time:
+Under the hood:
+
+- **Windows** — a `schtasks` task named `ChatArchiverExport` that launches
+  `headless_export.py` via `pythonw` (no console window).
+- **Linux** — a **systemd user timer** at
+  `~/.config/systemd/user/chatarchiver-export.{service,timer}` (`Persistent=true`, so a
+  missed run fires at next boot). Inspect it with
+  `systemctl --user list-timers chatarchiver-export.timer`. It runs while you're logged
+  in; to keep it firing when you're not, enable lingering once:
+  `loginctl enable-linger $USER`. (`every N days`/`every N weeks` are approximated to the
+  nearest systemd `OnCalendar` form — hourly, daily, and weekly-on-a-weekday are exact.)
+
+You can also run a manual headless export any time:
 
 ```
 python headless_export.py
 ```
+
+## Closing the window keeps it running (system tray)
+
+The app lives in the **system tray** (Windows notification area / Linux status tray).
+**Closing the window doesn't quit** — it hides to the tray and scheduled exports keep
+happening. The tray icon's menu lets you **Open** the window again, **Run export now**, or
+**Quit** for real. (If a machine has no usable tray, closing the window simply quits, as
+before.)
 
 ## Which browser it uses
 

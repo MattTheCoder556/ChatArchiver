@@ -20,7 +20,7 @@ try:
 except Exception:                            # pragma: no cover - fall back to coloured dots
     Image = ImageTk = None
 
-from . import exe_updater, scheduler
+from . import exe_updater, scheduler, tray
 from .cookie_fetch import COOKIE_PROVIDERS, WIP_PROVIDER_IDS, session_status, site_url
 from .cookie_fetch import export as cookie_export
 from .playwright_runner import open_for_login, run_export
@@ -74,6 +74,11 @@ class App:
         self._bar_pulsing = False
         self.dark = tk.BooleanVar(value=cfg.get("theme") == "dark")
         self._imgs: list = []                # keep PhotoImage refs alive (else tk GCs them)
+        self._tray = None                    # system-tray icon (set up below, may be None)
+        # Plain-string mirror of the schedule line, read by the tray thread (reading a tk
+        # StringVar off the main thread isn't safe).
+        self._sched_summary = "Automatic export: off"
+        self._notified_tray = False          # only explain 'minimised to tray' once
 
         # scheduling controls
         self.freq = tk.StringVar(value=sched.get("frequency", "Off"))
@@ -84,6 +89,7 @@ class App:
         self._build()
         self.root.after(100, self._drain)
         self._refresh_schedule_status()
+        self._setup_tray()
         # Frozen .exe: quietly check GitHub Releases on launch and offer any newer build.
         # (Source runs already auto-updated via git in run.py before this window opened.)
         if exe_updater.is_frozen():
@@ -378,6 +384,74 @@ class App:
     def _post(self, kind: str, payload) -> None:
         self.q.put((kind, payload))
 
+    # ---- system tray (keep running with the window closed) ----
+    def _setup_tray(self) -> None:
+        """Create the tray icon and route window-close to 'hide to tray'. If a tray can't
+        be created (pystray missing / no tray backend), closing the window quits as usual."""
+        self._tray = tray.build_tray(
+            on_open=lambda: self.root.after(0, self._show_window),
+            on_export_now=lambda: self.root.after(0, self._export_all_now),
+            on_quit=lambda: self.root.after(0, self._quit_app),
+            schedule_text=lambda: self._sched_summary,
+        )
+        if self._tray is not None:
+            try:
+                self._tray.run_detached()        # tray loop on its own thread
+            except Exception:
+                self._tray = None
+        # With a tray: closing the window hides it. Without: normal quit.
+        self.root.protocol("WM_DELETE_WINDOW",
+                            self._hide_to_tray if self._tray else self._quit_app)
+
+    def _hide_to_tray(self) -> None:
+        self.root.withdraw()
+        if not self._notified_tray:
+            self._notified_tray = True
+            self._log("Still running in the tray — exports keep happening on schedule. "
+                      "Open it from the tray icon, or use the icon's menu to quit.")
+
+    def _show_window(self) -> None:
+        self.root.deiconify()
+        self.root.lift()
+        try:
+            self.root.focus_force()
+        except Exception:
+            pass
+
+    def _quit_app(self) -> None:
+        if self._tray is not None:
+            try:
+                self._tray.stop()
+            except Exception:
+                pass
+            self._tray = None
+        self.root.destroy()
+
+    def _export_all_now(self) -> None:
+        """Tray 'Run export now': export every connected cookie-handoff provider in the
+        background, logging to the activity panel. Mirrors the scheduled run."""
+        if "__all__" in self.busy:
+            return
+        self.busy.add("__all__")
+        self._persist_output()
+        out = self.output.get()
+        ids = tuple(p for p in COOKIE_PROVIDERS if p not in WIP_PROVIDER_IDS)
+
+        def work():
+            self._post("log", "[export] Running export for all connected accounts…")
+            self._post("bar", (0, None))
+            try:
+                cookie_export(providers=ids, out_dir=out, write=True,
+                              log=lambda m: self._post("log", m))
+                self._post("log", "[export] Done.")
+            except Exception as e:
+                self._post("log", f"[export] ERROR: {e}")
+            finally:
+                self.busy.discard("__all__")
+                self._post("bar", (1, 1))
+
+        threading.Thread(target=work, daemon=True).start()
+
     # ---- scheduling ----
     def _apply_schedule(self) -> None:
         freq, day, time_ = self.freq.get(), self.day.get(), self.time.get()
@@ -394,11 +468,13 @@ class App:
             try:
                 if freq == "Off":
                     scheduler.clear_schedule()
+                    self._sched_summary = "Automatic export: off"
                     self._post("sched", ("Automatic export is off.", _GREY))
                     self._post("log", "[schedule] Automatic export turned off.")
                 else:
                     scheduler.set_schedule(freq, day, time_, n)
                     when = self._describe_when(freq, day, time_, n)
+                    self._sched_summary = f"Automatic export: {when}"
                     self._post("sched", (f"Scheduled: {when}.", _GREEN))
                     self._post("log", f"[schedule] Will export {when} (background).")
             except Exception as e:
@@ -423,8 +499,10 @@ class App:
                 return
             if st.get("scheduled"):
                 nxt = st.get("Next Run Time", "")
+                self._sched_summary = f"Automatic export: on (next: {nxt})".strip()
                 self._post("sched", (f"Scheduled ✓  next run: {nxt}".strip(), _GREEN))
             else:
+                self._sched_summary = "Automatic export: off"
                 self._post("sched", ("Automatic export is off.", _GREY))
 
         threading.Thread(target=work, daemon=True).start()

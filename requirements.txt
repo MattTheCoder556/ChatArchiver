@@ -13,3 +13,7 @@ sv-ttk
 
 # Renders/resizes the bundled provider + app logos for the window (tk only shows bitmaps).
 Pillow
+
+# System-tray icon — lets the app keep running with its window closed (Windows
+# notification area / Linux status tray). Reopen or quit from the tray menu.
+pystray
