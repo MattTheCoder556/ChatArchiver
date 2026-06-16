@@ -1,8 +1,10 @@
-name: Build & release Windows exe
+name: Build & release (Windows exe + Linux binary)
 
-# Every push to main produces a fresh one-folder PyInstaller build and publishes it as a
-# GitHub Release. The packaged app's auto-updater (chatarchiver/exe_updater.py) checks this
-# repo's "latest" release on launch and swaps itself in place when a newer version exists.
+# Every push to main produces fresh one-folder PyInstaller builds and publishes them on one
+# GitHub Release: a Windows .zip and a Linux .tar.gz. The Windows job creates the release;
+# the Linux job (needs: build) attaches its tarball to the same release.
+# The packaged Windows app's auto-updater (chatarchiver/exe_updater.py) swaps itself in place
+# on launch; on Linux that updater is a no-op (update = re-download the .tar.gz).
 # Version = 0.1.<run_number>, which increases monotonically so the compare always works.
 
 on:
@@ -58,3 +60,38 @@ jobs:
           gh release create "v$env:VERSION" "ChatArchiver-$env:VERSION.zip" `
             --title "v$env:VERSION" `
             --notes "Automated build of commit ${{ github.sha }}."
+
+  build-linux:
+    needs: build                 # the Windows job creates the release; we attach to it
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Use the runner's system Python (3.12 on ubuntu-24.04) + the Tk binding, so the
+      # bundled GUI has _tkinter. A venv inherits _tkinter from this system Python.
+      - name: Install Python Tk + venv
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk python3-venv
+
+      - name: Compute version and stamp it into the build
+        run: |
+          v="0.1.${{ github.run_number }}"
+          echo "__version__ = \"$v\"" > chatarchiver/_version.py
+          echo "VERSION=$v" >> "$GITHUB_ENV"
+          echo "Building version $v"
+
+      - name: Build binary
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -r requirements.txt pyinstaller
+          .venv/bin/python -m PyInstaller --noconfirm ChatArchiver.spec
+
+      - name: Package
+        run: tar -C dist -czf "ChatArchiver-$VERSION-linux-x86_64.tar.gz" ChatArchiver
+
+      - name: Attach Linux binary to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "v$VERSION" "ChatArchiver-$VERSION-linux-x86_64.tar.gz" --clobber

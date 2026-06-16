@@ -82,6 +82,11 @@ def _api_latest() -> dict:
 def check() -> tuple[bool, str, str]:
     """Return (update_available, latest_version, zip_url). Best-effort: any failure or a
     non-newer release yields (False, current_version, '')."""
+    # The in-place swap is Windows-only (.zip / ChatArchiver.exe / .bat helper). On the
+    # Linux build, releases carry a .tar.gz instead; updating there is a manual re-download,
+    # so never offer or attempt a swap (it would try to install the Windows .zip).
+    if not sys.platform.startswith("win"):
+        return (False, CURRENT, "")
     try:
         data = _api_latest()
     except Exception:
